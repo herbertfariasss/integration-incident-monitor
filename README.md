@@ -101,4 +101,4 @@ npm test
 npm run build
 ```
 
-O GitHub Actions executa lint e testes do backend contra PostgreSQL, além de lint, testes e build do frontend. A IA permanece isolada em `app/ai.py`: a rota opcional usa um provedor compatível com Chat Completions, com dados fictícios e aviso de revisão humana.
+O GitHub Actions executa lint e testes do backend contra PostgreSQL, lint, testes e build do frontend e uma verificação real do Compose: inicia a pilha, percorre o fluxo principal, recria os contêineres sem apagar o volume e confirma a persistência. A IA permanece isolada em `app/ai.py`: a rota opcional usa um provedor compatível com Chat Completions, com dados fictícios e aviso de revisão humana.

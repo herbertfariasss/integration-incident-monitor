@@ -41,3 +41,56 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+  compose-smoke:
+    runs-on: ubuntu-latest
+    env:
+      DELIVERY_BASE_DELAY_SECONDS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start complete stack
+        run: |
+          cp .env.example .env
+          docker compose up -d --build --wait
+      - name: Exercise incident and delivery flow
+        run: |
+          set -euo pipefail
+          curl --fail --silent http://localhost:8080/ | grep 'Integration Incident Monitor'
+          curl --fail --silent http://localhost:8000/health | jq -e '.status == "ok"'
+          for n in 1 2 3; do
+            curl --fail --silent -X POST http://localhost:8000/api/v1/events \
+              -H 'Content-Type: application/json' \
+              -d "{\"event_id\":\"compose-$n\",\"integration\":\"compose-demo\",\"status\":\"failure\",\"error_code\":\"DEMO_TIMEOUT\",\"message\":\"Falha fictícia\",\"occurred_at\":\"2026-11-25T12:00:00Z\",\"simulated_failures\":3}" > "event-$n.json"
+          done
+          jq -e '.action == "incident_opened" and .incident.occurrence_count == 3' event-3.json
+          curl --fail --silent -X POST http://localhost:8000/api/v1/events \
+            -H 'Content-Type: application/json' \
+            -d '{"event_id":"compose-3","integration":"compose-demo","status":"failure","error_code":"DEMO_TIMEOUT","message":"Falha fictícia","occurred_at":"2026-11-25T12:00:00Z"}' | jq -e '.duplicate == true'
+          incident_id=$(jq -r '.incident.id' event-3.json)
+          for attempt in $(seq 1 20); do
+            delivery_id=$(curl --fail --silent "http://localhost:8000/api/v1/incidents/$incident_id/deliveries" | jq -r '.[0].id')
+            state=$(curl --fail --silent "http://localhost:8000/api/v1/incidents/$incident_id/deliveries" | jq -r '.[0].status')
+            if [ "$state" = exhausted ]; then break; fi
+            sleep 1
+          done
+          test "$state" = exhausted
+          curl --fail --silent -X POST "http://localhost:8000/api/v1/deliveries/$delivery_id/reprocess" | jq -e '.status == "pending"'
+          for attempt in $(seq 1 10); do
+            state=$(curl --fail --silent "http://localhost:8000/api/v1/incidents/$incident_id/deliveries" | jq -r '.[0].status')
+            if [ "$state" = succeeded ]; then break; fi
+            sleep 1
+          done
+          test "$state" = succeeded
+          curl --fail --silent -X PATCH "http://localhost:8000/api/v1/incidents/$incident_id/close" \
+            -H 'Content-Type: application/json' \
+            -d '{"resolution":"Entrega fictícia reprocessada e verificada."}' | jq -e '.status == "closed"'
+      - name: Recreate containers without deleting database volume
+        run: |
+          docker compose down
+          docker compose up -d --build --wait
+          curl --fail --silent http://localhost:8000/api/v1/incidents/counts | jq -e '.closed == 1'
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop containers
+        if: always()
+        run: docker compose down
