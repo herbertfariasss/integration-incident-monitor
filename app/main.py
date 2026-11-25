@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
@@ -12,23 +11,25 @@ from app.ai import IncidentAssistant, OpenAICompatibleIncidentAssistant
 from app.database import Database
 from app.models import EventData
 from app.schemas import (
+    AttemptResponse,
     CloseIncidentRequest,
+    DeliveryResponse,
     EventCreate,
     EventProcessingResponse,
+    EventResponse,
     HealthResponse,
     IncidentAnalysisResponse,
     IncidentResponse,
 )
-from app.services import IncidentNotFoundError, IncidentService
+from app.services import IncidentNotFoundError, IncidentService, ReprocessConflictError
 
 
 def create_app(
-    database_path: str | Path | None = None,
+    database_url: str | None = None,
     *,
     incident_assistant: IncidentAssistant | None = None,
 ) -> FastAPI:
-    resolved_path = database_path or os.getenv("INCIDENT_DB_PATH", "incidents.db")
-    database = Database(resolved_path)
+    database = Database(database_url)
     service = IncidentService(database)
     if incident_assistant is None:
         ai_api_url = os.getenv("AI_API_URL")
@@ -63,6 +64,11 @@ def create_app(
 
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     def health() -> HealthResponse:
+        try:
+            with database.connection() as connection:
+                connection.execute("SELECT 1")
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Banco indisponível") from exc
         return HealthResponse(status="ok")
 
     @app.post(
@@ -83,7 +89,7 @@ def create_app(
             occurred_at=payload.occurred_at,
             error_code=payload.error_code,
         )
-        result = service.process_event(event)
+        result = service.process_event(event, payload.simulated_failures)
         return EventProcessingResponse(**asdict(result))
 
     @app.get(
@@ -97,8 +103,16 @@ def create_app(
             Literal["open", "closed"] | None,
             Query(alias="status"),
         ] = None,
+        integration: str | None = Query(default=None, min_length=1, max_length=100),
+        error_code: str | None = Query(default=None, min_length=1, max_length=100),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
     ) -> list[dict[str, object]]:
-        return service.list_incidents(incident_status)
+        return service.list_incidents(incident_status, integration, error_code, limit, offset)
+
+    @app.get("/api/v1/incidents/counts", tags=["incidents"])
+    def incident_counts(service: IncidentService = Depends(get_service)) -> dict[str, int]:
+        return service.counts()
 
     @app.get(
         "/api/v1/incidents/{incident_id}",
@@ -113,6 +127,47 @@ def create_app(
             return service.get_incident(incident_id)
         except IncidentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/v1/incidents/{incident_id}/events", response_model=list[EventResponse], tags=["incidents"])
+    def incident_events(
+        incident_id: int, limit: int = Query(default=100, ge=1, le=100),
+        offset: int = Query(default=0, ge=0), service: IncidentService = Depends(get_service),
+    ) -> list[dict]:
+        try:
+            return service.get_timeline(incident_id, limit, offset)
+        except IncidentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/v1/incidents/{incident_id}/deliveries", response_model=list[DeliveryResponse], tags=["deliveries"])
+    def incident_deliveries(
+        incident_id: int, limit: int = Query(default=100, ge=1, le=100),
+        offset: int = Query(default=0, ge=0), service: IncidentService = Depends(get_service),
+    ) -> list[dict]:
+        try:
+            return service.list_deliveries(incident_id, limit, offset)
+        except IncidentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/v1/deliveries/{delivery_id}/attempts", response_model=list[AttemptResponse], tags=["deliveries"])
+    def delivery_attempts(
+        delivery_id: int, limit: int = Query(default=100, ge=1, le=100),
+        offset: int = Query(default=0, ge=0), service: IncidentService = Depends(get_service),
+    ) -> list[dict]:
+        try:
+            return service.list_attempts(delivery_id, limit, offset)
+        except IncidentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/deliveries/{delivery_id}/reprocess", response_model=DeliveryResponse, tags=["deliveries"])
+    def reprocess_delivery(
+        delivery_id: int, service: IncidentService = Depends(get_service),
+    ) -> dict:
+        try:
+            return service.reprocess(delivery_id)
+        except IncidentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReprocessConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.patch(
         "/api/v1/incidents/{incident_id}/close",

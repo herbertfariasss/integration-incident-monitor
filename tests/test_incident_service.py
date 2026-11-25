@@ -58,6 +58,26 @@ def test_failures_outside_window_do_not_open_incident(service: IncidentService) 
     assert service.list_incidents() == []
 
 
+def test_exact_30_minute_boundary_opens_incident(service: IncidentService) -> None:
+    service.process_event(failure(1, minutes=0))
+    service.process_event(failure(2, minutes=15))
+    result = service.process_event(failure(3, minutes=30))
+    assert result.action == "incident_opened"
+    assert result.incident is not None
+    assert result.incident["occurrence_count"] == 3
+
+
+def test_success_does_not_close_incident(service: IncidentService) -> None:
+    for number in range(1, 4):
+        service.process_event(failure(number, minutes=number))
+    success = EventData(
+        event_id="success-1", integration="crm-webhook", status="success",
+        message="Integração recuperada", occurred_at=BASE_TIME + timedelta(minutes=10),
+    )
+    assert service.process_event(success).action == "event_recorded"
+    assert service.list_incidents()[0]["status"] == "open"
+
+
 def test_incident_can_be_closed_with_resolution(service: IncidentService) -> None:
     for number in range(1, 4):
         service.process_event(failure(number, minutes=number))
