@@ -1,0 +1,10 @@
+.git
+.env
+.local-pg
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+.coverage
+frontend/node_modules
+frontend/dist

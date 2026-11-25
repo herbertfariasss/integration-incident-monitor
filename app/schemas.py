@@ -15,6 +15,7 @@ class EventCreate(BaseModel):
     message: str = Field(min_length=1, max_length=500)
     occurred_at: datetime
     error_code: str | None = Field(default=None, min_length=1, max_length=100)
+    simulated_failures: int = Field(default=0, ge=0, le=20)
 
     @model_validator(mode="after")
     def validate_error_code(self) -> EventCreate:
@@ -64,3 +65,35 @@ class IncidentAnalysisResponse(BaseModel):
     summary: str
     suggested_investigation: list[str]
     disclaimer: str
+
+
+class EventResponse(BaseModel):
+    id: int
+    event_id: str
+    integration: str
+    status: Literal["success", "failure"]
+    error_code: str | None
+    message: str
+    occurred_at: datetime
+    received_at: datetime
+
+
+class DeliveryResponse(BaseModel):
+    id: int
+    event_id: str | None = None
+    status: Literal["pending", "running", "succeeded", "exhausted"]
+    cycle: int
+    attempt_count: int
+    next_attempt_at: datetime | None
+    last_error: str | None
+
+
+class AttemptResponse(BaseModel):
+    id: int
+    delivery_id: int
+    cycle: int
+    attempt_number: int
+    started_at: datetime
+    finished_at: datetime
+    result: Literal["failed", "succeeded"]
+    failure_reason: str | None
